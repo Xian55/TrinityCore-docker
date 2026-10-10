@@ -91,12 +91,68 @@ table_count() {
     sql "$1" "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$(db_name "$1")'" 2>/dev/null || echo 0
 }
 
+# sql_in <connection>: run the SQL on stdin inside the named database.
+sql_in() {
+    local host port user pass name
+    IFS=';' read -r host port user pass name _ <<<"$1"
+    MYSQL_PWD="$pass" mysql -h"$host" -P"$port" -u"$user" --binary-mode --max-allowed-packet=1G "$name"
+}
+
+# Source without an sql folder (Wrathion) gives the worldserver nothing to fill a database from.
+# Its image carries one full dump per database instead, and each empty database is filled from
+# its dump here. The dumps were made on MariaDB under another account, so the collation MySQL
+# lacks and the view definers are rewritten on the way in.
+#
+# They are also another realm's dumps. Its accounts and characters are emptied: what stays in the
+# auth and characters databases is what TrinityCore's own base dumps fill.
+fill_from_dumps() {
+    local archive=/opt/databases/databases.7z sevenzip entry kind dump keep info tables
+    sevenzip=$(command -v 7z || command -v 7zz)
+    for entry in \
+        "LOGIN:auth:build_info,rbac_default_permissions,rbac_linked_permissions,rbac_permissions,realmlist,updates,updates_include" \
+        "CHARACTER:characters:updates,updates_include,world_variable" \
+        "WORLD:world:" \
+        "HOTFIX:hotfixes:"; do
+        IFS=: read -r kind dump keep <<<"$entry"
+        info="TC_${kind}_DATABASE_INFO"
+        info=${!info:-}
+        [ -n "$info" ] || continue
+        [ "$(table_count "$info")" -eq 0 ] || continue
+
+        log "filling $(db_name "$info") from $dump.sql"
+        if ! "$sevenzip" e -so "$archive" "$dump.sql" \
+            | LC_ALL=C sed -E \
+                -e '/^CREATE DATABASE /d' -e '/^USE `/d' \
+                -e 's/ DEFINER=`[^`]*`@`[^`]*`//g' \
+                -e 's/_uca1400_ai_ci/_unicode_ci/g' \
+            | sql_in "$info"; then
+            log "$dump.sql did not import; empty the $(db_name "$info") database before the next start"
+            exit 1
+        fi
+
+        [ -n "$keep" ] || continue
+        tables=$(sql "$info" "SELECT table_name FROM information_schema.tables
+            WHERE table_schema = '$(db_name "$info")' AND table_type = 'BASE TABLE'
+              AND FIND_IN_SET(table_name, '$keep') = 0")
+        [ -n "$tables" ] || continue
+        # shellcheck disable=SC2086  # one TRUNCATE per table name
+        { echo "SET FOREIGN_KEY_CHECKS = 0;"; printf 'TRUNCATE TABLE `%s`;\n' $tables; } | sql_in "$info"
+    done
+}
+
 # The worldserver fills an empty world (and hotfixes) database from the TDB release files in its
 # working directory. The image carries them compressed; unpack them only when they are needed and
 # drop them again once the databases are filled.
 prepare_world() {
     [ -n "${TC_WORLD_DATABASE_INFO:-}" ] || return 0
     wait_for_mysql "$TC_WORLD_DATABASE_INFO"
+
+    if [ -e /opt/databases/databases.7z ]; then
+        fill_from_dumps
+        # No sql folder, so there are no updates to look for either.
+        export TC_UPDATES_ENABLE_DATABASES=0
+        return 0
+    fi
 
     local infos=("$TC_WORLD_DATABASE_INFO") needed=0
     if grep -q '^HotfixDatabaseInfo' "$TC_CONF_DIR/worldserver.conf" && [ -n "${TC_HOTFIX_DATABASE_INFO:-}" ]; then

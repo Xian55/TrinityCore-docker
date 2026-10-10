@@ -7,6 +7,8 @@
 #   docker build --platform linux/arm64 --build-arg TC_BRANCH=3.3.5 --build-arg TC_TAG=<commit> .
 #   docker build --build-arg TC_GITHUB=The-Cataclysm-Preservation-Project/TrinityCore \
 #                --build-arg TC_BASE=compiled --build-arg TC_BRANCH=master --build-arg TC_TAG=master .
+#   docker build --build-arg TC_GITHUB=Xian55/3.4.3_Source --build-arg TC_BASE=compiled \
+#                --build-arg TC_BRANCH=main --build-arg TC_TAG=main --build-arg TC_DATABASES=<url> .
 #
 # amd64 starts from TrinityCore's own image (built by their CI for every commit). They publish no
 # arm64 image, so on arm64 the same commit is compiled here, into the same layout, and everything
@@ -20,6 +22,11 @@ ARG TC_GITHUB=TrinityCore/TrinityCore
 # Where the binaries come from. Empty: TC_IMAGE on amd64, compiled on arm64. "compiled": compiled
 # on every architecture.
 ARG TC_BASE=
+# For source without an sql folder (Wrathion): the URL of a .7z holding one full dump per
+# database, auth.sql, characters.sql, world.sql and hotfixes.sql, taken in place of a TDB release.
+# TC_DATABASES_SHA256, when given, has to match the download.
+ARG TC_DATABASES=
+ARG TC_DATABASES_SHA256=
 ARG UBUNTU_VERSION=24.04
 
 FROM ${TC_IMAGE}:${TC_TAG} AS base-amd64
@@ -77,7 +84,7 @@ RUN cmake -S /src -B /build \
  && mkdir -p /out/usr/local/bin /out/usr/local/lib /out/home/circleci/project \
  && cp -a /home/circleci/project/bin/check_install/bin/. /out/usr/local/bin/ \
  && if [ -d /home/circleci/project/bin/check_install/lib ]; then cp -a /home/circleci/project/bin/check_install/lib/. /out/usr/local/lib/; fi \
- && cp -r /src/sql /out/home/circleci/project/ \
+ && if [ -d /src/sql ]; then cp -r /src/sql /out/home/circleci/project/; fi \
  && find /out/usr/local/bin -type f -perm -u+x -exec strip {} + \
  && rm -rf /build
 
@@ -116,6 +123,8 @@ FROM base-${TC_BASE:-${TARGETARCH}}
 
 ARG TC_BRANCH=cata_classic
 ARG TC_GITHUB
+ARG TC_DATABASES
+ARG TC_DATABASES_SHA256
 
 USER root
 
@@ -154,7 +163,17 @@ RUN set -eu; \
 
 # The world (and hotfixes) base data is a release download, named in revision_data.h.in.cmake.
 # 3.3.5 ships it as TDB_full_world_<version>.7z, the classic branches as TDB_full_<version>.7z.
+# With TC_DATABASES the full dumps are taken instead; the entrypoint imports those itself.
 RUN set -eu; \
+    if [ -n "${TC_DATABASES}" ]; then \
+      mkdir -p /opt/databases; \
+      curl -fsSL -o /opt/databases/databases.7z "${TC_DATABASES}"; \
+      if [ -n "${TC_DATABASES_SHA256}" ]; then \
+        echo "${TC_DATABASES_SHA256}  /opt/databases/databases.7z" | sha256sum -c -; \
+      fi; \
+      ls -l /opt/databases; \
+      exit 0; \
+    fi; \
     raw="https://raw.githubusercontent.com/${TC_GITHUB}/$(cat /home/circleci/project/REVISION)"; \
     full=$(curl -fsSL "$raw/revision_data.h.in.cmake" | sed -n 's/.*_FULL_DATABASE *"\(.*\)\.sql".*/\1/p'); \
     rest=${full#TDB_full_world_}; \

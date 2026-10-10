@@ -6,8 +6,9 @@ name: Build images
 # was built from. The check is a few Docker Hub and registry lookups, seconds; a rebuild is
 # minutes for amd64 and about an hour for arm64, which compiles that commit.
 #
-# 4.3.4 is the Cataclysm Preservation Project's fork. Its CI publishes no image, so the commit is
-# the head of its master branch and both architectures compile it.
+# 4.3.4 is the Cataclysm Preservation Project's fork and wrathion a 3.4.3 server of its own.
+# Neither has a CI that publishes an image, so the commit is the head of the repository's branch
+# and both architectures compile it.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -16,7 +17,7 @@ on:
       branch:
         description: TrinityCore branch
         type: choice
-        options: [all, cata_classic, "3.3.5", "4.3.4"]
+        options: [all, cata_classic, "3.3.5", "4.3.4", wrathion]
         default: all
       force:
         description: Rebuild even if the image is already published
@@ -65,9 +66,8 @@ jobs:
           # it on the image, so a change here rebuilds exactly the images that lack it.
           recipe=$({ git rev-parse HEAD:Dockerfile; git rev-parse HEAD:docker; } | sha256sum | cut -c1-16)
           echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
-          if [ "$BRANCH" = all ]; then branches="cata_classic 3.3.5 4.3.4"; else branches="$BRANCH"; fi
+          if [ "$BRANCH" = all ]; then branches="cata_classic 3.3.5 4.3.4 wrathion"; else branches="$BRANCH"; fi
           hub="https://hub.docker.com/v2/repositories/trinitycore/trinitycore/tags"
-          cata434="The-Cataclysm-Preservation-Project/TrinityCore"
 
           # The branch tag carries no commit, but the same push also tags the image by its commit.
           commit_of() {
@@ -86,14 +86,29 @@ jobs:
           targets="[]"
           echo "| Branch | Commit | Result |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          # name is the image tag; github, branch and base are the Dockerfile's TC_GITHUB,
-          # TC_BRANCH and TC_BASE.
+          # name is the image tag; github, branch, base and databases are the Dockerfile's
+          # TC_GITHUB, TC_BRANCH, TC_BASE and TC_DATABASES.
           for name in $branches; do
-            if [ "$name" = 4.3.4 ]; then
-              github=$cata434 branch=master base=compiled
+            databases= databases_sha256=
+            case "$name" in
+              4.3.4)
+                github=The-Cataclysm-Preservation-Project/TrinityCore branch=master base=compiled
+                ;;
+              wrathion)
+                # No sql folder in this source: its databases are full dumps, a release of the
+                # repository it was forked from. The checksum fails the build should that file
+                # ever be replaced, instead of pairing the server with another database.
+                github=Xian55/3.4.3_Source branch=main base=compiled
+                databases=https://github.com/lineagedr/3.4.3_Source/releases/download/databases/Databases.7z
+                databases_sha256=dd25e47e91405d740d4f9ec3a8ae306fc20f4d549d81fcbf28e0759612a78a36
+                ;;
+              *)
+                github=TrinityCore/TrinityCore branch=$name base=
+                ;;
+            esac
+            if [ "$base" = compiled ]; then
               sha=$(git ls-remote "https://github.com/$github" "refs/heads/$branch" | cut -f1)
             else
-              github=TrinityCore/TrinityCore branch=$name base=
               sha=$(commit_of "$name")
             fi
             if [ -z "$sha" ]; then
@@ -115,7 +130,8 @@ jobs:
               fi
               result="building $tag ($why)"
               targets=$(jq -c --arg n "$name" --arg g "$github" --arg b "$branch" --arg s "$sha" --arg base "$base" \
-                '. + [{name: $n, github: $g, branch: $b, sha: $s, base: $base}]' <<<"$targets")
+                --arg db "$databases" --arg dbsum "$databases_sha256" \
+                '. + [{name: $n, github: $g, branch: $b, sha: $s, base: $base, databases: $db, databases_sha256: $dbsum}]' <<<"$targets")
             fi
             echo "$name: $result"
             echo "| $name | [${sha:0:12}](https://github.com/$github/commit/$sha) | $result |" >> "$GITHUB_STEP_SUMMARY"
@@ -168,6 +184,8 @@ jobs:
             TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
+            TC_DATABASES=${{ matrix.target.databases }}
+            TC_DATABASES_SHA256=${{ matrix.target.databases_sha256 }}
           labels: |
             org.opencontainers.image.version=${{ matrix.target.name }}-${{ steps.tags.outputs.short }}
             io.github.trinitycore.revision=${{ matrix.target.sha }}
@@ -192,6 +210,8 @@ jobs:
             TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
+            TC_DATABASES=${{ matrix.target.databases }}
+            TC_DATABASES_SHA256=${{ matrix.target.databases_sha256 }}
           labels: |
             org.opencontainers.image.version=${{ matrix.target.name }}-${{ steps.tags.outputs.short }}
             io.github.trinitycore.revision=${{ matrix.target.sha }}

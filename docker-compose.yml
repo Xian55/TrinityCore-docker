@@ -62,8 +62,8 @@ services:
       TC_MMAP_ENABLE_PATH_FINDING: ${ENABLE_MMAPS:-0}
     ports:
       - "${WORLD_PORT:-8085}:${WORLD_PORT:-8085}"
-      # 4.3.4 only: at character login that server moves the player to a second connection, on
-      # this port. The other branches have no such port and leave it unused.
+      # 4.3.4 and wrathion: at character login those servers move the player to a second
+      # connection, on this port. The other branches have no such port and leave it unused.
       - "${INSTANCE_PORT:-8086}:${INSTANCE_PORT:-8086}"
     volumes:
       - data:/data:ro
@@ -78,7 +78,7 @@ services:
 
   login:
     <<: *trinitycore
-    # bnetserver on cata_classic, authserver on 3.3.5 and 4.3.4
+    # bnetserver on cata_classic and wrathion, authserver on 3.3.5 and 4.3.4
     command: login
     # Once the worldserver listens, its database updates are done and the realm list is final.
     depends_on:
