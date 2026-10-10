@@ -1,0 +1,2 @@
+# Everything here runs on Linux; CRLF breaks the shell scripts inside the image.
+* text=auto eol=lf

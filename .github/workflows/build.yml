@@ -1,0 +1,146 @@
+name: Build images
+
+# A daily check of TrinityCore's own images (trinitycore/trinitycore:<branch>, pushed by their CI
+# for each commit that passes it). A branch is rebuilt only when that image moved to a commit we
+# have no image for yet. The check is a few Docker Hub and registry lookups, seconds.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: TrinityCore branch
+        type: choice
+        options: [all, cata_classic, "3.3.5"]
+        default: all
+      force:
+        description: Rebuild even if the commit is already published
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker/**
+      - .github/workflows/build.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for new commits
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.check.outputs.image }}
+      targets: ${{ steps.check.outputs.targets }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: check
+        env:
+          BRANCH: ${{ inputs.branch || 'all' }}
+          # A change to the image itself rebuilds every branch.
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/trinitycore"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [ "$BRANCH" = all ]; then branches="cata_classic 3.3.5"; else branches="$BRANCH"; fi
+          hub="https://hub.docker.com/v2/repositories/trinitycore/trinitycore/tags"
+
+          # The branch tag carries no commit, but the same push also tags the image by its commit.
+          commit_of() {
+            local digest page url
+            digest=$(curl -fsSL "$hub/$1" | jq -r .digest)
+            url="$hub?page_size=100&ordering=last_updated"
+            for page in 1 2 3 4 5 6 7 8 9 10; do
+              local json; json=$(curl -fsSL "$url")
+              local sha; sha=$(jq -r --arg d "$digest" '.results[] | select(.digest == $d and (.name | test("^[0-9a-f]{40}$"))) | .name' <<<"$json" | head -n1)
+              if [ -n "$sha" ]; then echo "$sha"; return; fi
+              url=$(jq -r '.next // empty' <<<"$json")
+              [ -n "$url" ] || break
+            done
+          }
+
+          targets="[]"
+          echo "| Branch | Commit | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for branch in $branches; do
+            sha=$(commit_of "$branch")
+            if [ -z "$sha" ]; then
+              echo "::error::no commit tag found for trinitycore/trinitycore:$branch"
+              exit 1
+            fi
+            tag="$branch-${sha:0:12}"
+            if [ "$FORCE" != true ] && docker buildx imagetools inspect "$image:$tag" >/dev/null 2>&1; then
+              result="unchanged, $tag already published"
+            else
+              result="new, building $tag"
+              targets=$(jq -c --arg b "$branch" --arg s "$sha" '. + [{branch: $b, sha: $s}]' <<<"$targets")
+            fi
+            echo "$branch: $result"
+            echo "| $branch | [${sha:0:12}](https://github.com/TrinityCore/TrinityCore/commit/$sha) | $result |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target.branch }}
+    needs: check
+    if: needs.check.outputs.targets != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.check.outputs.targets) }}
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
+      BRANCH: ${{ matrix.target.branch }}
+      SHA: ${{ matrix.target.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: tags
+        run: echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            TC_BRANCH=${{ matrix.target.branch }}
+            TC_TAG=${{ matrix.target.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+            org.opencontainers.image.base.name=docker.io/trinitycore/trinitycore:${{ matrix.target.sha }}
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:${{ matrix.target.branch }}
+            ${{ env.IMAGE }}:${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+
+      - name: Smoke test
+        run: |
+          docker run --rm "$IMAGE:$BRANCH" worldserver --version
+          docker run --rm "$IMAGE:$BRANCH" login --version
+          test "$(docker run --rm --entrypoint cat "$IMAGE:$BRANCH" /home/circleci/project/REVISION)" = "${SHA:0:12}"
+
+      - name: Push
+        run: |
+          docker push "$IMAGE:$BRANCH-${SHA:0:12}"
+          docker push "$IMAGE:$BRANCH"

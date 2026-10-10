@@ -1,0 +1,118 @@
+# TrinityCore: MySQL, worldserver and login server from ghcr.io/xian55/trinitycore.
+#
+#   cp .env.example .env                                  # pick the branch, set REALM_ADDRESS
+#   docker compose --profile tools run --rm extract       # once, from a client install
+#   docker compose up -d
+#
+# Settings for compose itself live in .env. Any TrinityCore config key can be set in tc.env
+# (optional) as TC_<KEY>: `PacketLogFile` is TC_PACKET_LOG_FILE, `Rate.XP.Kill` is TC_RATE_XP_KILL.
+
+x-trinitycore: &trinitycore
+  image: ${TC_IMAGE:-ghcr.io/xian55/trinitycore}:${TC_BRANCH:-cata_classic}
+  # TrinityCore's binaries are amd64 only; Docker on Apple silicon runs them under Rosetta.
+  platform: linux/amd64
+  restart: unless-stopped
+  env_file:
+    - path: tc.env
+      required: false
+
+x-databases: &databases
+  TC_LOGIN_DATABASE_INFO: "db;3306;${TC_DB_USER:-trinity};${TC_DB_PASSWORD:-trinity};auth"
+  TC_WORLD_DATABASE_INFO: "db;3306;${TC_DB_USER:-trinity};${TC_DB_PASSWORD:-trinity};world"
+  TC_CHARACTER_DATABASE_INFO: "db;3306;${TC_DB_USER:-trinity};${TC_DB_PASSWORD:-trinity};characters"
+  TC_HOTFIX_DATABASE_INFO: "db;3306;${TC_DB_USER:-trinity};${TC_DB_PASSWORD:-trinity};hotfixes"
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-trinity-root}
+      TC_DB_USER: ${TC_DB_USER:-trinity}
+      TC_DB_PASSWORD: ${TC_DB_PASSWORD:-trinity}
+    volumes:
+      - db:/var/lib/mysql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+      - ./database/conf.d:/etc/mysql/conf.d:ro
+    ports:
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  worldserver:
+    <<: *trinitycore
+    command: worldserver
+    # The console needs a terminal: `docker attach <project>-worldserver-1`, detach with Ctrl-P Ctrl-Q.
+    tty: true
+    stdin_open: true
+    stop_grace_period: 1m
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *databases
+      TC_WORLD_SERVER_PORT: ${WORLD_PORT:-8085}
+      TC_PACKET_LOG_FILE: ${PACKET_LOG_FILE:-}
+      TC_VMAP_ENABLE_LOS: ${ENABLE_VMAPS:-1}
+      TC_VMAP_ENABLE_HEIGHT: ${ENABLE_VMAPS:-1}
+      TC_VMAP_ENABLE_INDOOR_CHECK: ${ENABLE_VMAPS:-1}
+      TC_MMAP_ENABLE_PATH_FINDING: ${ENABLE_MMAPS:-0}
+    ports:
+      - "${WORLD_PORT:-8085}:${WORLD_PORT:-8085}"
+    volumes:
+      - data:/data:ro
+      - logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/$${TC_WORLD_SERVER_PORT}'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The first start fills the databases from the TDB dump.
+      start_period: 30m
+
+  login:
+    <<: *trinitycore
+    # bnetserver on the classic branches, authserver on 3.3.5
+    command: login
+    # Once the worldserver listens, its database updates are done and the realm list is final.
+    depends_on:
+      worldserver:
+        condition: service_healthy
+    environment:
+      TC_LOGIN_DATABASE_INFO: "db;3306;${TC_DB_USER:-trinity};${TC_DB_PASSWORD:-trinity};auth"
+      TC_BATTLENET_PORT: ${LOGIN_PORT:-1119}
+      TC_REALM_SERVER_PORT: ${LOGIN_PORT:-1119}
+      TC_LOGIN_REST_PORT: ${REST_PORT:-8081}
+      REALM_ADDRESS: ${REALM_ADDRESS:-127.0.0.1}
+      REALM_LOCAL_ADDRESS: ${REALM_LOCAL_ADDRESS:-}
+      REALM_PORT: ${WORLD_PORT:-8085}
+      REALM_NAME: ${REALM_NAME:-}
+    ports:
+      - "${LOGIN_PORT:-1119}:${LOGIN_PORT:-1119}"
+      - "${REST_PORT:-8081}:${REST_PORT:-8081}"
+    volumes:
+      - logs:/logs
+
+  extract:
+    <<: *trinitycore
+    command: extract
+    profiles: ["tools"]
+    restart: "no"
+    environment:
+      EXTRACT_VMAPS: ${EXTRACT_VMAPS:-1}
+      EXTRACT_MMAPS: ${EXTRACT_MMAPS:-0}
+      EXTRACT_THREADS: ${EXTRACT_THREADS:-}
+    volumes:
+      # Not read-only: CascLib opens .build.info and the CASC config and index files read-write,
+      # although it only reads them.
+      - ${CLIENT_DIR:-./client}:/client
+      - data:/data
+
+volumes:
+  db:
+  data:
+  logs:

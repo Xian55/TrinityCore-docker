@@ -1,0 +1,5 @@
+[mysqld]
+# The TDB world dump has single statements well above the 64 MB default.
+max_allowed_packet = 1G
+# Binary logs grow by gigabytes on a busy realm and nothing here replicates.
+skip-log-bin
