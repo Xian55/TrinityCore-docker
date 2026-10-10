@@ -18,7 +18,8 @@ commit, the matching [TDB](https://github.com/TrinityCore/TrinityCore/releases) 
 release, and an entrypoint that sets up the databases and the realm. A daily workflow picks up
 new commits.
 
-The images are amd64 only, as TrinityCore's are. Docker on Apple silicon runs them under Rosetta.
+The images are multi-arch, amd64 and arm64. TrinityCore publishes amd64 only, so the arm64 image
+compiles the same commit into the same layout; Apple silicon and ARM servers run it natively.
 No game data is in the image: you extract it from your own client, once.
 
 ## Quick start
@@ -124,11 +125,14 @@ docker compose --env-file 3.3.5.env up -d
 ## Building the image yourself
 
 ```sh
-docker build --platform linux/amd64 --build-arg TC_BRANCH=cata_classic --build-arg TC_TAG=cata_classic   -t ghcr.io/xian55/trinitycore:cata_classic .
+docker build --platform linux/amd64 --build-arg TC_BRANCH=cata_classic --build-arg TC_TAG=cata_classic \
+  -t ghcr.io/xian55/trinitycore:cata_classic .
 ```
 
 `TC_TAG` is the tag of the official image to start from: the branch, or a full commit hash.
-Nothing is compiled, the build takes about a minute.
+On amd64 nothing is compiled and the build takes about a minute. With `--platform linux/arm64`
+the same commit is compiled, about an hour on four cores; `BUILD_JOBS=<n>` limits the compile
+jobs, each of which needs up to ~1.5 GB of memory.
 
 ## Credits
 

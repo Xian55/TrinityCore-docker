@@ -2,7 +2,8 @@ name: Build images
 
 # A daily check of TrinityCore's own images (trinitycore/trinitycore:<branch>, pushed by their CI
 # for each commit that passes it). A branch is rebuilt only when that image moved to a commit we
-# have no image for yet. The check is a few Docker Hub and registry lookups, seconds.
+# have no image for yet. The check is a few Docker Hub and registry lookups, seconds; a rebuild
+# is minutes for amd64 and about an hour for arm64, which compiles that commit.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -93,20 +94,30 @@ jobs:
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.target.branch }}
+    name: Build ${{ matrix.target.branch }} ${{ matrix.platform.arch }}
     needs: check
     if: needs.check.outputs.targets != '[]'
     strategy:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.check.outputs.targets) }}
-    runs-on: ubuntu-24.04
+        # amd64 wraps TrinityCore's own image (minutes); arm64 compiles the same commit on a
+        # native arm64 runner (about an hour).
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 330
     env:
       IMAGE: ${{ needs.check.outputs.image }}
       BRANCH: ${{ matrix.target.branch }}
       SHA: ${{ matrix.target.sha }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        if: matrix.platform.arch == 'arm64'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
       - uses: docker/setup-buildx-action@v3
 
@@ -119,28 +130,85 @@ jobs:
       - id: tags
         run: echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v6
+      - name: Build
+        uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.platform.arch }}
           build-args: |
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
           labels: |
             org.opencontainers.image.version=${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
-            org.opencontainers.image.base.name=docker.io/trinitycore/trinitycore:${{ matrix.target.sha }}
+            io.github.trinitycore.revision=${{ matrix.target.sha }}
           load: true
-          tags: |
-            ${{ env.IMAGE }}:${{ matrix.target.branch }}
-            ${{ env.IMAGE }}:${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+          tags: local/trinitycore:test
 
       - name: Smoke test
         run: |
-          docker run --rm "$IMAGE:$BRANCH" worldserver --version
-          docker run --rm "$IMAGE:$BRANCH" login --version
-          test "$(docker run --rm --entrypoint cat "$IMAGE:$BRANCH" /home/circleci/project/REVISION)" = "${SHA:0:12}"
+          docker run --rm local/trinitycore:test worldserver --version
+          docker run --rm local/trinitycore:test login --version
+          test "$(docker run --rm --entrypoint cat local/trinitycore:test /home/circleci/project/REVISION)" = "${SHA:0:12}"
 
-      - name: Push
+      # The same build again from the builder's cache, pushed by digest; the publish job joins
+      # the architectures under the branch tags.
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            TC_BRANCH=${{ matrix.target.branch }}
+            TC_TAG=${{ matrix.target.sha }}
+          labels: |
+            org.opencontainers.image.version=${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+            io.github.trinitycore.revision=${{ matrix.target.sha }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Keep the digest
         run: |
-          docker push "$IMAGE:$BRANCH-${SHA:0:12}"
-          docker push "$IMAGE:$BRANCH"
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.target.branch }}-${{ matrix.platform.arch }}
+          path: digests/*
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.target.branch }}
+    needs: [check, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.check.outputs.targets) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.target.branch }}-*
+          path: digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag the multi-arch image
+        env:
+          IMAGE: ${{ needs.check.outputs.image }}
+          BRANCH: ${{ matrix.target.branch }}
+          SHA: ${{ matrix.target.sha }}
+        run: |
+          test "$(ls digests | wc -l)" -eq 2
+          docker buildx imagetools create \
+            -t "$IMAGE:$BRANCH" -t "$IMAGE:$BRANCH-${SHA:0:12}" \
+            $(for d in digests/*; do printf '%s@sha256:%s ' "$IMAGE" "$(basename "$d")"; done)
+          docker buildx imagetools inspect "$IMAGE:$BRANCH"

@@ -9,8 +9,6 @@
 
 x-trinitycore: &trinitycore
   image: ${TC_IMAGE:-ghcr.io/xian55/trinitycore}:${TC_BRANCH:-cata_classic}
-  # TrinityCore's binaries are amd64 only; Docker on Apple silicon runs them under Rosetta.
-  platform: linux/amd64
   restart: unless-stopped
   env_file:
     - path: tc.env

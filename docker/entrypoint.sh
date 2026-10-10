@@ -67,7 +67,10 @@ prepare_world() {
     if [ "$needed" -eq 1 ]; then
         if ! ls TDB_full_*.sql >/dev/null 2>&1; then
             log "unpacking $(basename /opt/tdb/*.7z) for the first database fill"
-            7z x -y /opt/tdb/*.7z >/dev/null
+            # Debian's 7zip package installs `7z`, Ubuntu's only `7zz`.
+            local sevenzip
+            sevenzip=$(command -v 7z || command -v 7zz)
+            "$sevenzip" x -y /opt/tdb/*.7z >/dev/null
         fi
     else
         rm -f TDB_full_*.sql
