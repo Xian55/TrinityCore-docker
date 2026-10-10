@@ -88,7 +88,10 @@ Detach with `Ctrl-P Ctrl-Q`. `Ctrl-C` or end-of-input stops the worldserver.
 
 - **3.3.5:** `set realmlist <REALM_ADDRESS>` in `realmlist.wtf` (with `LOGIN_PORT` other than 3724,
   `<REALM_ADDRESS>:<LOGIN_PORT>`).
-- **4.3.4:** the same line, as `SET realmlist "<REALM_ADDRESS>"` in `WTF/Config.wtf`.
+- **4.3.4:** the same line, as `SET realmlist "<REALM_ADDRESS>"` in `WTF/Config.wtf`. This server
+  uses two connections per player: `WORLD_PORT`, and from character login on `INSTANCE_PORT`.
+  For a client or proxy that stays on the first one, set `TC_LEGACY_CONNECTION_MODE_ENABLED=1`
+  in `tc.env`.
 - **cata_classic:** the client has to be pointed at `<REALM_ADDRESS>:<LOGIN_PORT>` as its portal and
   accept the server's certificate, which needs a launcher such as
   [Arctium](https://arctium.io/). Log in with the e-mail address of the Battle.net account.
@@ -130,8 +133,9 @@ docker compose cp worldserver:/logs/World-20261010-140501.pkt .
 
 ### Two branches on one host
 
-Give each its own env file with its own `COMPOSE_PROJECT_NAME` and ports (`REST_PORT` too, also
-for a branch with an authserver, which does not use it):
+Give each its own env file with its own `COMPOSE_PROJECT_NAME` and ports. That includes
+`REST_PORT` and `INSTANCE_PORT`, also for a branch that does not use them: they are published
+either way.
 
 ```sh
 docker compose --env-file cata.env  up -d
