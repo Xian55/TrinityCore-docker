@@ -2,17 +2,61 @@
 # Entrypoint of the TrinityCore image.
 #
 #   worldserver [args]   start the worldserver (default)
-#   login [args]         start the branch's login server: bnetserver, or authserver on 3.3.5
+#   login [args]         start the branch's login server: bnetserver, or authserver on 3.3.5 and 4.3.4
 #   bnetserver|authserver [args]
 #   extract              extract the server data from a client mounted at /client into /data
 #   anything else        run as given (bash, mapextractor, ...)
 #
 # Config comes from $TC_CONF_DIR/*.conf, overridden by TC_* environment variables
 # (TrinityCore maps `LoginREST.ExternalAddress` to TC_LOGIN_REST_EXTERNAL_ADDRESS) and by
-# any *.conf file mounted into $TC_CONF_DIR/<server>.conf.d/.
+# any *.conf file mounted into $TC_CONF_DIR/<server>.conf.d/. The 4.3.4 fork reads neither, see
+# write_config.
 set -euo pipefail
 
 log() { echo "[tc-entrypoint] $*" >&2; }
+
+# Source from before TrinityCore read TC_* variables takes its config from the file alone. An
+# image built from such source is marked, and here <server>.conf is written from <server>.conf.dist
+# with every key replaced whose variable is set. The variable names follow TrinityCore's own rule
+# (IniKeyToEnvVarKey in Config.cpp), so one tc.env works on every branch.
+write_config() {
+    local server=$1
+    [ -e "$TC_CONF_DIR/.env-to-conf" ] || return 0
+    LC_ALL=C awk '
+        function env_name(key,    i, n, c, d, out) {
+            out = "TC_"
+            n = length(key)
+            for (i = 1; i <= n; i++) {
+                c = substr(key, i, 1)
+                if (c == " " || c == "." || c == "-") {
+                    out = out "_"
+                    continue
+                }
+                d = substr(key, i + 1, 1)
+                # aB -> A_B, a1 -> A_1, 1a -> 1_A
+                if (i < n && ((c !~ /[A-Z]/ && d ~ /[A-Z]/) || ((c ~ /[0-9]/) != (d ~ /[0-9]/))))
+                    out = out toupper(c) "_"
+                else
+                    out = out toupper(c)
+            }
+            return out
+        }
+        /^[A-Za-z][A-Za-z0-9._-]*[ \t]*=/ {
+            key = $0
+            sub(/[ \t]*=.*/, "", key)
+            name = env_name(key)
+            if (name in ENVIRON) {
+                value = ENVIRON[name]
+                # Strings are quoted in the file and numbers are not; the .dist line shows which.
+                if ($0 ~ /=[ \t]*"/)
+                    value = "\"" value "\""
+                print key " = " value
+                next
+            }
+        }
+        { print }
+    ' "$TC_CONF_DIR/$server.conf.dist" > "$TC_CONF_DIR/$server.conf"
+}
 
 # Connection strings are TrinityCore's "host;port;user;password;database".
 db_name() {
@@ -113,7 +157,8 @@ extract() {
     fi
     cd /data
 
-    # 3.3.5 reads MPQ archives from Data/; the CASC branches open <client>/Data themselves.
+    # 3.3.5's vmap4extractor takes the Data folder; every other branch takes the client folder
+    # and opens <client>/Data itself.
     if [ "$TC_BRANCH" = "3.3.5" ]; then
         vmap_input="$client/Data"
     else
@@ -162,17 +207,21 @@ case "$command" in
             export TC_PACKET_LOG_FILE
             log "packet log: /logs/$TC_PACKET_LOG_FILE"
         fi
+        write_config worldserver
         run_server worldserver "$@"
         ;;
     login)
         prepare_login
         if command -v bnetserver >/dev/null; then
+            write_config bnetserver
             run_server bnetserver "$@"
         fi
+        write_config authserver
         run_server authserver "$@"
         ;;
     bnetserver|authserver)
         prepare_login
+        write_config "$command"
         run_server "$command" "$@"
         ;;
     extract)

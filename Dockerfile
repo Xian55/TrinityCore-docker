@@ -5,14 +5,21 @@
 #
 #   docker build --platform linux/amd64 --build-arg TC_BRANCH=cata_classic --build-arg TC_TAG=cata_classic .
 #   docker build --platform linux/arm64 --build-arg TC_BRANCH=3.3.5 --build-arg TC_TAG=<commit> .
+#   docker build --build-arg TC_GITHUB=The-Cataclysm-Preservation-Project/TrinityCore \
+#                --build-arg TC_BASE=compiled --build-arg TC_BRANCH=master --build-arg TC_TAG=master .
 #
 # amd64 starts from TrinityCore's own image (built by their CI for every commit). They publish no
 # arm64 image, so on arm64 the same commit is compiled here, into the same layout, and everything
-# after the base stage is shared.
+# after the base stage is shared. A fork without such an image is compiled on both.
 
 ARG TC_IMAGE=trinitycore/trinitycore
 # The official image's tag: the branch or a full commit hash. arm64 compiles that same ref.
 ARG TC_TAG=cata_classic
+# The GitHub repository the source, the config files and the TDB release come from.
+ARG TC_GITHUB=TrinityCore/TrinityCore
+# Where the binaries come from. Empty: TC_IMAGE on amd64, compiled on arm64. "compiled": compiled
+# on every architecture.
+ARG TC_BASE=
 ARG UBUNTU_VERSION=24.04
 
 FROM ${TC_IMAGE}:${TC_TAG} AS base-amd64
@@ -28,13 +35,32 @@ RUN apt-get update \
       libreadline-dev libncurses-dev libbz2-dev zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
 
-ARG TC_REPO=https://github.com/TrinityCore/TrinityCore.git
+ARG TC_GITHUB
 ARG TC_TAG
 ARG TC_BRANCH=cata_classic
 RUN git init --quiet /src \
- && git -C /src fetch --quiet --depth 1 "${TC_REPO}" "${TC_TAG}" \
+ && git -C /src fetch --quiet --depth 1 "https://github.com/${TC_GITHUB}.git" "${TC_TAG}" \
  && git -C /src checkout --quiet -B "${TC_BRANCH}" FETCH_HEAD \
  && git -C /src log -1 --format='%H %cs %s'
+
+# Source that predates TrinityCore's arm64 support (the 4.3.4 fork) fails there in two places.
+# Each is looked for in the source, so a tree that has it fixed builds as written:
+#  - the bundled jemalloc is set up for x86 (cmake never sets TRINITY_SYSTEM_PROCESSOR, so it
+#    takes the x86 spin-wait instruction): the servers are built on the system allocator;
+#  - PCGRand.cpp includes <emmintrin.h>, x86-only, for an aligned malloc: docker/arm64 has a
+#    stand-in for that header.
+COPY docker/arm64/ /opt/arm64/
+RUN : > /tmp/cmake-args; \
+    if [ "$(uname -m)" = aarch64 ]; then \
+      if grep -qs TRINITY_SYSTEM_PROCESSOR /src/dep/jemalloc/CMakeLists.txt \
+         && ! grep -rqs 'set(TRINITY_SYSTEM_PROCESSOR' /src/cmake /src/CMakeLists.txt; then \
+        echo "-DNOJEM=1" >> /tmp/cmake-args; \
+      fi; \
+      if grep -qs '<emmintrin.h>' /src/src/common/Utilities/PCGRand.cpp; then \
+        echo "-DCMAKE_CXX_FLAGS=-I/opt/arm64" >> /tmp/cmake-args; \
+      fi; \
+    fi; \
+    echo "extra cmake arguments: $(tr '\n' ' ' < /tmp/cmake-args)"
 
 # The official images' paths: the config directory is compiled in, and the entrypoint and the
 # layers below expect binaries in /usr/local/bin and the SQL under /home/circleci/project.
@@ -45,6 +71,7 @@ RUN cmake -S /src -B /build \
       -DCMAKE_INSTALL_PREFIX=/home/circleci/project/bin/check_install \
       -DTOOLS=1 -DSERVERS=1 -DSCRIPTS=static \
       -DWITH_WARNINGS=0 -DWITH_COREDEBUG=0 -DBUILD_TESTING=0 \
+      $(cat /tmp/cmake-args) \
  && cmake --build /build --parallel "${BUILD_JOBS:-$(nproc)}" \
  && cmake --install /build \
  && mkdir -p /out/usr/local/bin /out/usr/local/lib /out/home/circleci/project \
@@ -63,7 +90,7 @@ RUN ldd /out/usr/local/bin/* 2>/dev/null \
  && cat /out/runtime-packages.txt
 
 
-FROM ubuntu:${UBUNTU_VERSION} AS base-arm64
+FROM ubuntu:${UBUNTU_VERSION} AS base-compiled
 
 ARG DEBIAN_FRONTEND=noninteractive
 COPY --from=compile /out/runtime-packages.txt /tmp/
@@ -82,10 +109,13 @@ USER circleci
 WORKDIR /home/circleci
 
 
-FROM base-${TARGETARCH}
+FROM base-compiled AS base-arm64
+
+
+FROM base-${TC_BASE:-${TARGETARCH}}
 
 ARG TC_BRANCH=cata_classic
-ARG TC_REPO_RAW=https://raw.githubusercontent.com/TrinityCore/TrinityCore
+ARG TC_GITHUB
 
 USER root
 
@@ -102,7 +132,7 @@ RUN set -eu; \
     rev=$(worldserver --version 2>/dev/null | sed -n 's/.*rev\. \([0-9a-f]\{12\}\).*/\1/p'); \
     test -n "$rev"; \
     echo "$rev" > /home/circleci/project/REVISION; \
-    raw="${TC_REPO_RAW}/${rev}"; \
+    raw="https://raw.githubusercontent.com/${TC_GITHUB}/${rev}"; \
     mkdir -p "$TC_CONF_DIR"; \
     for server in worldserver bnetserver authserver; do \
       [ -x "/usr/local/bin/$server" ] || continue; \
@@ -111,16 +141,27 @@ RUN set -eu; \
       mkdir -p "$TC_CONF_DIR/$server.conf.d"; \
     done
 
+# TrinityCore reads TC_* environment variables over its config files. Source from before that
+# (the 4.3.4 fork) does not, so the entrypoint writes them into the config file instead.
+RUN set -eu; \
+    raw="https://raw.githubusercontent.com/${TC_GITHUB}/$(cat /home/circleci/project/REVISION)"; \
+    curl -fsSL -o /tmp/Config.cpp "$raw/src/common/Configuration/Config.cpp"; \
+    if ! grep -q getenv /tmp/Config.cpp; then \
+      touch "$TC_CONF_DIR/.env-to-conf"; \
+      echo "no TC_* support in this source: the entrypoint writes the config files"; \
+    fi; \
+    rm /tmp/Config.cpp
+
 # The world (and hotfixes) base data is a release download, named in revision_data.h.in.cmake.
 # 3.3.5 ships it as TDB_full_world_<version>.7z, the classic branches as TDB_full_<version>.7z.
 RUN set -eu; \
-    raw="${TC_REPO_RAW}/$(cat /home/circleci/project/REVISION)"; \
+    raw="https://raw.githubusercontent.com/${TC_GITHUB}/$(cat /home/circleci/project/REVISION)"; \
     full=$(curl -fsSL "$raw/revision_data.h.in.cmake" | sed -n 's/.*_FULL_DATABASE *"\(.*\)\.sql".*/\1/p'); \
     rest=${full#TDB_full_world_}; \
     tag="TDB${rest%%_*}"; \
     mkdir -p /opt/tdb; \
     for asset in "TDB_full_${rest}.7z" "TDB_full_world_${rest}.7z"; do \
-      if curl -fsSL -o "/opt/tdb/${asset}" "https://github.com/TrinityCore/TrinityCore/releases/download/${tag}/${asset}"; then \
+      if curl -fsSL -o "/opt/tdb/${asset}" "https://github.com/${TC_GITHUB}/releases/download/${tag}/${asset}"; then \
         echo "${tag}/${asset}"; break; \
       fi; \
       rm -f "/opt/tdb/${asset}"; \
@@ -145,7 +186,7 @@ WORKDIR /home/circleci
 VOLUME ["/data", "/logs"]
 
 LABEL org.opencontainers.image.title="TrinityCore ${TC_BRANCH}" \
-      org.opencontainers.image.description="TrinityCore ${TC_BRANCH}, ready to run: official binaries, configs, TDB and database setup" \
+      org.opencontainers.image.description="${TC_GITHUB} ${TC_BRANCH}, ready to run: binaries, configs, TDB and database setup" \
       org.opencontainers.image.source="https://github.com/Xian55/TrinityCore-docker" \
       org.opencontainers.image.licenses="GPL-2.0-only"
 

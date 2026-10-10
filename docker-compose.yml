@@ -74,7 +74,7 @@ services:
 
   login:
     <<: *trinitycore
-    # bnetserver on the classic branches, authserver on 3.3.5
+    # bnetserver on cata_classic, authserver on 3.3.5 and 4.3.4
     command: login
     # Once the worldserver listens, its database updates are done and the realm list is final.
     depends_on:

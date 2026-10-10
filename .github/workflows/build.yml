@@ -2,8 +2,12 @@ name: Build images
 
 # A daily check of TrinityCore's own images (trinitycore/trinitycore:<branch>, pushed by their CI
 # for each commit that passes it). A branch is rebuilt only when that image moved to a commit we
-# have no image for yet. The check is a few Docker Hub and registry lookups, seconds; a rebuild
-# is minutes for amd64 and about an hour for arm64, which compiles that commit.
+# have no image for yet, or when the recipe here (Dockerfile and docker/) is not the one its image
+# was built from. The check is a few Docker Hub and registry lookups, seconds; a rebuild is
+# minutes for amd64 and about an hour for arm64, which compiles that commit.
+#
+# 4.3.4 is the Cataclysm Preservation Project's fork. Its CI publishes no image, so the commit is
+# the head of its master branch and both architectures compile it.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -12,10 +16,10 @@ on:
       branch:
         description: TrinityCore branch
         type: choice
-        options: [all, cata_classic, "3.3.5"]
+        options: [all, cata_classic, "3.3.5", "4.3.4"]
         default: all
       force:
-        description: Rebuild even if the commit is already published
+        description: Rebuild even if the image is already published
         type: boolean
         default: false
   push:
@@ -39,8 +43,11 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.check.outputs.image }}
+      recipe: ${{ steps.check.outputs.recipe }}
       targets: ${{ steps.check.outputs.targets }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -50,13 +57,17 @@ jobs:
       - id: check
         env:
           BRANCH: ${{ inputs.branch || 'all' }}
-          # A change to the image itself rebuilds every branch.
-          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+          FORCE: ${{ inputs.force || false }}
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/trinitycore"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          if [ "$BRANCH" = all ]; then branches="cata_classic 3.3.5"; else branches="$BRANCH"; fi
+          # What an image is built from besides the TrinityCore commit. The publish job records
+          # it on the image, so a change here rebuilds exactly the images that lack it.
+          recipe=$({ git rev-parse HEAD:Dockerfile; git rev-parse HEAD:docker; } | sha256sum | cut -c1-16)
+          echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
+          if [ "$BRANCH" = all ]; then branches="cata_classic 3.3.5 4.3.4"; else branches="$BRANCH"; fi
           hub="https://hub.docker.com/v2/repositories/trinitycore/trinitycore/tags"
+          cata434="The-Cataclysm-Preservation-Project/TrinityCore"
 
           # The branch tag carries no commit, but the same push also tags the image by its commit.
           commit_of() {
@@ -75,26 +86,44 @@ jobs:
           targets="[]"
           echo "| Branch | Commit | Result |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          for branch in $branches; do
-            sha=$(commit_of "$branch")
+          # name is the image tag; github, branch and base are the Dockerfile's TC_GITHUB,
+          # TC_BRANCH and TC_BASE.
+          for name in $branches; do
+            if [ "$name" = 4.3.4 ]; then
+              github=$cata434 branch=master base=compiled
+              sha=$(git ls-remote "https://github.com/$github" "refs/heads/$branch" | cut -f1)
+            else
+              github=TrinityCore/TrinityCore branch=$name base=
+              sha=$(commit_of "$name")
+            fi
             if [ -z "$sha" ]; then
-              echo "::error::no commit tag found for trinitycore/trinitycore:$branch"
+              echo "::error::no commit found for $name ($github)"
               exit 1
             fi
-            tag="$branch-${sha:0:12}"
-            if [ "$FORCE" != true ] && docker buildx imagetools inspect "$image:$tag" >/dev/null 2>&1; then
+            tag="$name-${sha:0:12}"
+            if manifest=$(docker buildx imagetools inspect --raw "$image:$tag" 2>/dev/null); then
+              built=$(jq -r '.annotations["io.github.xian55.recipe"] // "unrecorded"' <<<"$manifest")
+            else
+              built=
+            fi
+            if [ "$FORCE" != true ] && [ "$built" = "$recipe" ]; then
               result="unchanged, $tag already published"
             else
-              result="new, building $tag"
-              targets=$(jq -c --arg b "$branch" --arg s "$sha" '. + [{branch: $b, sha: $s}]' <<<"$targets")
+              if [ "$FORCE" = true ]; then why="forced"
+              elif [ -z "$built" ]; then why="new commit"
+              else why="recipe changed, was $built"
+              fi
+              result="building $tag ($why)"
+              targets=$(jq -c --arg n "$name" --arg g "$github" --arg b "$branch" --arg s "$sha" --arg base "$base" \
+                '. + [{name: $n, github: $g, branch: $b, sha: $s, base: $base}]' <<<"$targets")
             fi
-            echo "$branch: $result"
-            echo "| $branch | [${sha:0:12}](https://github.com/TrinityCore/TrinityCore/commit/$sha) | $result |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$name: $result"
+            echo "| $name | [${sha:0:12}](https://github.com/$github/commit/$sha) | $result |" >> "$GITHUB_STEP_SUMMARY"
           done
           echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.target.branch }} ${{ matrix.platform.arch }}
+    name: Build ${{ matrix.target.name }} ${{ matrix.platform.arch }}
     needs: check
     if: needs.check.outputs.targets != '[]'
     strategy:
@@ -102,7 +131,7 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.check.outputs.targets) }}
         # amd64 wraps TrinityCore's own image (minutes); arm64 compiles the same commit on a
-        # native arm64 runner (about an hour).
+        # native arm64 runner (about an hour). 4.3.4 compiles on both.
         platform:
           - { arch: amd64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }
@@ -110,13 +139,12 @@ jobs:
     timeout-minutes: 330
     env:
       IMAGE: ${{ needs.check.outputs.image }}
-      BRANCH: ${{ matrix.target.branch }}
       SHA: ${{ matrix.target.sha }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Free disk space
-        if: matrix.platform.arch == 'arm64'
+        if: matrix.platform.arch == 'arm64' || matrix.target.base == 'compiled'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
       - uses: docker/setup-buildx-action@v3
@@ -136,10 +164,12 @@ jobs:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
           build-args: |
+            TC_GITHUB=${{ matrix.target.github }}
+            TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
           labels: |
-            org.opencontainers.image.version=${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+            org.opencontainers.image.version=${{ matrix.target.name }}-${{ steps.tags.outputs.short }}
             io.github.trinitycore.revision=${{ matrix.target.sha }}
           load: true
           tags: local/trinitycore:test
@@ -158,10 +188,12 @@ jobs:
           context: .
           platforms: linux/${{ matrix.platform.arch }}
           build-args: |
+            TC_GITHUB=${{ matrix.target.github }}
+            TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
           labels: |
-            org.opencontainers.image.version=${{ matrix.target.branch }}-${{ steps.tags.outputs.short }}
+            org.opencontainers.image.version=${{ matrix.target.name }}-${{ steps.tags.outputs.short }}
             io.github.trinitycore.revision=${{ matrix.target.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
@@ -174,12 +206,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.target.branch }}-${{ matrix.platform.arch }}
+          name: digests-${{ matrix.target.name }}-${{ matrix.platform.arch }}
           path: digests/*
           retention-days: 1
 
   publish:
-    name: Publish ${{ matrix.target.branch }}
+    name: Publish ${{ matrix.target.name }}
     needs: [check, build]
     strategy:
       fail-fast: false
@@ -189,7 +221,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: digests-${{ matrix.target.branch }}-*
+          pattern: digests-${{ matrix.target.name }}-*
           path: digests
           merge-multiple: true
 
@@ -204,11 +236,13 @@ jobs:
       - name: Tag the multi-arch image
         env:
           IMAGE: ${{ needs.check.outputs.image }}
-          BRANCH: ${{ matrix.target.branch }}
+          NAME: ${{ matrix.target.name }}
           SHA: ${{ matrix.target.sha }}
+          RECIPE: ${{ needs.check.outputs.recipe }}
         run: |
           test "$(ls digests | wc -l)" -eq 2
           docker buildx imagetools create \
-            -t "$IMAGE:$BRANCH" -t "$IMAGE:$BRANCH-${SHA:0:12}" \
+            --annotation "index:io.github.xian55.recipe=$RECIPE" \
+            -t "$IMAGE:$NAME" -t "$IMAGE:$NAME-${SHA:0:12}" \
             $(for d in digests/*; do printf '%s@sha256:%s ' "$IMAGE" "$(basename "$d")"; done)
-          docker buildx imagetools inspect "$IMAGE:$BRANCH"
+          docker buildx imagetools inspect "$IMAGE:$NAME"
