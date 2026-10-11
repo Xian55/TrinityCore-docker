@@ -9,6 +9,7 @@ and filled on the first start.
 | `cata_classic` | Cataclysm Classic 4.4.2.60895 | `ghcr.io/xian55/trinitycore:cata_classic` |
 | `3.3.5` | Wrath of the Lich King 3.3.5a.12340 | `ghcr.io/xian55/trinitycore:3.3.5` |
 | `4.3.4` | Cataclysm 4.3.4.15595 | `ghcr.io/xian55/trinitycore:4.3.4` |
+| `wrathion` | Wrath of the Lich King Classic 3.4.3.54261 | `ghcr.io/xian55/trinitycore:wrathion` |
 
 Each branch is also tagged `<branch>-<upstream commit>`, e.g. `cata_classic-cf0cdb6abd7a`.
 
@@ -24,6 +25,12 @@ new commits.
 the maintained server for the original Cataclysm client. That project publishes no image, so this
 one is compiled here, with its own TDB release.
 
+`wrathion` is [Wrathion](https://github.com/lineagedr/3.4.3_Source), a TrinityCore-derived server
+for the Wrath Classic client, built from the fork at
+[Xian55/3.4.3_Source](https://github.com/Xian55/3.4.3_Source) and compiled here as well. It has no
+`sql` folder: its databases are filled from the full dumps its author published, without the
+accounts and characters those dumps hold.
+
 The images are multi-arch, amd64 and arm64. TrinityCore publishes amd64 only, so the arm64 image
 compiles the same commit into the same layout; Apple silicon and ARM servers run it natively.
 No game data is in the image: you extract it from your own client, once.
@@ -37,8 +44,9 @@ cp .env.example .env        # set TC_BRANCH, REALM_ADDRESS (this host's LAN addr
 
 ### 1. Extract the server data from a client
 
-`CLIENT_DIR` is the client install folder, the one holding `Data/`. For `cata_classic` that is a
-CASC install with its `.build.info` next to `Data/`; for 3.3.5 and 4.3.4 the folder with `Data/*.MPQ`.
+`CLIENT_DIR` is the client install folder, the one holding `Data/`. For `cata_classic` and
+`wrathion` that is a CASC install with its `.build.info` next to `Data/`; for 3.3.5 and 4.3.4 the
+folder with `Data/*.MPQ`.
 The folder is mounted writable, because the CASC library opens some of its files read-write
 (it only reads them). With Docker Desktop or colima, it has to be in a folder shared with the VM.
 
@@ -69,7 +77,7 @@ docker attach tc-cata-worldserver-1     # <COMPOSE_PROJECT_NAME>-worldserver-1
 ```
 
 ```text
-# cata_classic: a Battle.net account, its game account is <id>#1
+# cata_classic and wrathion: a Battle.net account, its game account is <id>#1
 bnetaccount create player@example.com secret
 account set seclevel 1#1 3 -1
 
@@ -92,9 +100,10 @@ Detach with `Ctrl-P Ctrl-Q`. `Ctrl-C` or end-of-input stops the worldserver.
   uses two connections per player: `WORLD_PORT`, and from character login on `INSTANCE_PORT`.
   For a client or proxy that stays on the first one, set `TC_LEGACY_CONNECTION_MODE_ENABLED=1`
   in `tc.env`.
-- **cata_classic:** the client has to be pointed at `<REALM_ADDRESS>:<LOGIN_PORT>` as its portal and
-  accept the server's certificate, which needs a launcher such as
+- **cata_classic and wrathion:** the client has to be pointed at `<REALM_ADDRESS>:<LOGIN_PORT>` as
+  its portal and accept the server's certificate, which needs a launcher such as
   [Arctium](https://arctium.io/). Log in with the e-mail address of the Battle.net account.
+  Wrathion also moves the player to `INSTANCE_PORT` at character login.
 
 ## Configuration
 
@@ -169,9 +178,25 @@ arm64 the build leaves out its bundled jemalloc (the servers use the system allo
 supplies a stand-in for one x86-only header, [docker/arm64](docker/arm64). Both are applied only
 while the source needs them.
 
+Wrathion is compiled the same way, and takes its databases from a download:
+
+```sh
+docker build \
+  --build-arg TC_GITHUB=Xian55/3.4.3_Source --build-arg TC_BASE=compiled \
+  --build-arg TC_BRANCH=main --build-arg TC_TAG=main \
+  --build-arg TC_DATABASES=https://github.com/lineagedr/3.4.3_Source/releases/download/databases/Databases.7z \
+  -t ghcr.io/xian55/trinitycore:wrathion .
+```
+
+`TC_DATABASES` is a `.7z` with one full dump per database (`auth.sql`, `characters.sql`,
+`world.sql`, `hotfixes.sql`), for source that has no `sql` folder to fill them from. On the first
+start the entrypoint imports each dump into its empty database, rewriting what MySQL does not
+take from a MariaDB dump, and then empties the account and character tables.
+`TC_DATABASES_SHA256` pins the download.
+
 ## Credits
 
 Inspired by [Byloth/cmangos-docker](https://github.com/Byloth/cmangos-docker) and
-[nicolaw/trinitycore](https://gitlab.com/nicolaw/trinitycore). TrinityCore and
+[nicolaw/trinitycore](https://gitlab.com/nicolaw/trinitycore). TrinityCore,
 [the Cataclysm Preservation Project's fork](https://github.com/The-Cataclysm-Preservation-Project/TrinityCore)
-are licensed under the GPL-2.0.
+and [Wrathion](https://github.com/lineagedr/3.4.3_Source) are licensed under the GPL-2.0.
