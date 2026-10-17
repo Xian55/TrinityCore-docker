@@ -20,10 +20,12 @@ commit, the matching [TDB](https://github.com/TrinityCore/TrinityCore/releases) 
 release, and an entrypoint that sets up the databases and the realm. A daily workflow picks up
 new commits.
 
-`4.3.4` is not a TrinityCore branch: it is the `master` of
+`4.3.4` is not a TrinityCore branch: it is
 [the Cataclysm Preservation Project's fork](https://github.com/The-Cataclysm-Preservation-Project/TrinityCore),
-the maintained server for the original Cataclysm client. That project publishes no image, so this
-one is compiled here, with its own TDB release.
+the maintained server for the original Cataclysm client, built from the fork at
+[Xian55/TrinityCore](https://github.com/Xian55/TrinityCore): its `master` is the project's
+`master` plus the fixes offered to the project and not taken yet. That project publishes no image,
+so this one is compiled here, with the project's own TDB release.
 
 `wrathion` is [Wrathion](https://github.com/lineagedr/3.4.3_Source), a TrinityCore-derived server
 for the Wrath Classic client, built from the fork at
@@ -167,13 +169,15 @@ jobs, each of which needs up to ~1.5 GB of memory.
 
 ```sh
 docker build \
-  --build-arg TC_GITHUB=The-Cataclysm-Preservation-Project/TrinityCore --build-arg TC_BASE=compiled \
+  --build-arg TC_GITHUB=Xian55/TrinityCore --build-arg TC_BASE=compiled \
+  --build-arg TC_RELEASES=The-Cataclysm-Preservation-Project/TrinityCore \
   --build-arg TC_BRANCH=master --build-arg TC_TAG=master \
   -t ghcr.io/xian55/trinitycore:4.3.4 .
 ```
 
 `TC_GITHUB` is the repository the source, the config files and the TDB release are taken from,
-and `TC_BASE=compiled` skips the official image. That fork has no arm64 support of its own, so on
+`TC_RELEASES` the one whose releases hold that TDB when `TC_GITHUB` is a fork without them, and
+`TC_BASE=compiled` skips the official image. That fork has no arm64 support of its own, so on
 arm64 the build leaves out its bundled jemalloc (the servers use the system allocator) and
 supplies a stand-in for one x86-only header, [docker/arm64](docker/arm64). Both are applied only
 while the source needs them.
