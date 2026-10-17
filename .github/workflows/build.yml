@@ -6,9 +6,10 @@ name: Build images
 # was built from. The check is a few Docker Hub and registry lookups, seconds; a rebuild is
 # minutes for amd64 and about an hour for arm64, which compiles that commit.
 #
-# 4.3.4 is the Cataclysm Preservation Project's fork and wrathion a 3.4.3 server of its own.
-# Neither has a CI that publishes an image, so the commit is the head of the repository's branch
-# and both architectures compile it.
+# 4.3.4 is the Cataclysm Preservation Project's fork and wrathion a 3.4.3 server of its own, each
+# built from a fork under Xian55 that carries fixes not taken upstream yet. Neither has a CI that
+# publishes an image, so the commit is the head of the fork's branch and both architectures
+# compile it.
 on:
   schedule:
     - cron: "0 3 * * *"
@@ -86,13 +87,16 @@ jobs:
           targets="[]"
           echo "| Branch | Commit | Result |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          # name is the image tag; github, branch, base and databases are the Dockerfile's
-          # TC_GITHUB, TC_BRANCH, TC_BASE and TC_DATABASES.
+          # name is the image tag; github, releases, branch, base and databases are the
+          # Dockerfile's TC_GITHUB, TC_RELEASES, TC_BRANCH, TC_BASE and TC_DATABASES.
           for name in $branches; do
-            databases= databases_sha256=
+            releases= databases= databases_sha256=
             case "$name" in
               4.3.4)
-                github=The-Cataclysm-Preservation-Project/TrinityCore branch=master base=compiled
+                # master of the fork is the project's master plus our fixes; the TDB releases
+                # stay with the project.
+                github=Xian55/TrinityCore branch=master base=compiled
+                releases=The-Cataclysm-Preservation-Project/TrinityCore
                 ;;
               wrathion)
                 # No sql folder in this source: its databases are full dumps, a release of the
@@ -129,9 +133,9 @@ jobs:
               else why="recipe changed, was $built"
               fi
               result="building $tag ($why)"
-              targets=$(jq -c --arg n "$name" --arg g "$github" --arg b "$branch" --arg s "$sha" --arg base "$base" \
+              targets=$(jq -c --arg n "$name" --arg g "$github" --arg r "$releases" --arg b "$branch" --arg s "$sha" --arg base "$base" \
                 --arg db "$databases" --arg dbsum "$databases_sha256" \
-                '. + [{name: $n, github: $g, branch: $b, sha: $s, base: $base, databases: $db, databases_sha256: $dbsum}]' <<<"$targets")
+                '. + [{name: $n, github: $g, releases: $r, branch: $b, sha: $s, base: $base, databases: $db, databases_sha256: $dbsum}]' <<<"$targets")
             fi
             echo "$name: $result"
             echo "| $name | [${sha:0:12}](https://github.com/$github/commit/$sha) | $result |" >> "$GITHUB_STEP_SUMMARY"
@@ -181,6 +185,7 @@ jobs:
           platforms: linux/${{ matrix.platform.arch }}
           build-args: |
             TC_GITHUB=${{ matrix.target.github }}
+            TC_RELEASES=${{ matrix.target.releases }}
             TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}
@@ -207,6 +212,7 @@ jobs:
           platforms: linux/${{ matrix.platform.arch }}
           build-args: |
             TC_GITHUB=${{ matrix.target.github }}
+            TC_RELEASES=${{ matrix.target.releases }}
             TC_BASE=${{ matrix.target.base }}
             TC_BRANCH=${{ matrix.target.branch }}
             TC_TAG=${{ matrix.target.sha }}

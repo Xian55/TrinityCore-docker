@@ -5,7 +5,8 @@
 #
 #   docker build --platform linux/amd64 --build-arg TC_BRANCH=cata_classic --build-arg TC_TAG=cata_classic .
 #   docker build --platform linux/arm64 --build-arg TC_BRANCH=3.3.5 --build-arg TC_TAG=<commit> .
-#   docker build --build-arg TC_GITHUB=The-Cataclysm-Preservation-Project/TrinityCore \
+#   docker build --build-arg TC_GITHUB=Xian55/TrinityCore \
+#                --build-arg TC_RELEASES=The-Cataclysm-Preservation-Project/TrinityCore \
 #                --build-arg TC_BASE=compiled --build-arg TC_BRANCH=master --build-arg TC_TAG=master .
 #   docker build --build-arg TC_GITHUB=Xian55/3.4.3_Source --build-arg TC_BASE=compiled \
 #                --build-arg TC_BRANCH=main --build-arg TC_TAG=main --build-arg TC_DATABASES=<url> .
@@ -19,6 +20,8 @@ ARG TC_IMAGE=trinitycore/trinitycore
 ARG TC_TAG=cata_classic
 # The GitHub repository the source, the config files and the TDB release come from.
 ARG TC_GITHUB=TrinityCore/TrinityCore
+# The repository whose releases hold that TDB, when TC_GITHUB is a fork without them.
+ARG TC_RELEASES=
 # Where the binaries come from. Empty: TC_IMAGE on amd64, compiled on arm64. "compiled": compiled
 # on every architecture.
 ARG TC_BASE=
@@ -123,6 +126,7 @@ FROM base-${TC_BASE:-${TARGETARCH}}
 
 ARG TC_BRANCH=cata_classic
 ARG TC_GITHUB
+ARG TC_RELEASES
 ARG TC_DATABASES
 ARG TC_DATABASES_SHA256
 
@@ -180,7 +184,7 @@ RUN set -eu; \
     tag="TDB${rest%%_*}"; \
     mkdir -p /opt/tdb; \
     for asset in "TDB_full_${rest}.7z" "TDB_full_world_${rest}.7z"; do \
-      if curl -fsSL -o "/opt/tdb/${asset}" "https://github.com/${TC_GITHUB}/releases/download/${tag}/${asset}"; then \
+      if curl -fsSL -o "/opt/tdb/${asset}" "https://github.com/${TC_RELEASES:-${TC_GITHUB}}/releases/download/${tag}/${asset}"; then \
         echo "${tag}/${asset}"; break; \
       fi; \
       rm -f "/opt/tdb/${asset}"; \
